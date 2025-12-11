@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+lazrs
+numpy
+python-multipart
+python-dotenv
+laspy
+psutil
+websockets
+sse-starlette
+aiohttp
+requests

@@ -1,0 +1,52 @@
+.file-explorer {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem;
+}
+
+.file-explorer h3 {
+  color: #e0e0e0;
+  margin: 0 0 1rem 0;
+  font-size: 1.1rem;
+}
+
+.file-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  transition: background 0.3s ease;
+}
+
+.file-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.file-icon {
+  margin-right: 0.5rem;
+  font-size: 1.2rem;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.file-name {
+  color: #e0e0e0;
+  font-size: 0.9rem;
+  margin-bottom: 0.2rem;
+}
+
+.file-size {
+  color: #b0b0b0;
+  font-size: 0.8rem;
+}
