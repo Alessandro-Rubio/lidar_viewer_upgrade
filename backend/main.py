@@ -1,95 +1,45 @@
-import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.routing import APIRouter
-import uvicorn
+from fastapi import FastAPI, WebSocket
+from pathlib import Path
+import numpy as np
+import json
+
+from spatial_index import SpatialIndex
 
 app = FastAPI()
-router = APIRouter()
 
-# ───────────────────────────────
-# MOCK DE LECTURA (REEMPLAZA POR LAZ REAL)
-# ───────────────────────────────
-def read_chunks(file, chunk_size):
-    import random
-    import struct
-
-    for _ in range(50):
-        data = bytearray()
-        for _ in range(chunk_size):
-            data.extend(struct.pack(
-                "ffffff",
-                random.random() * 100,
-                random.random() * 100,
-                random.random() * 100,
-                random.random(),
-                random.random(),
-                random.random()
-            ))
-        yield bytes(data)
+spatial = SpatialIndex(Path("data/processed"))
+spatial.load()
 
 
-# ───────────────────────────────
-# WEBSOCKET
-# ───────────────────────────────
-@router.websocket("/ws/binary-stream")
-async def ws_stream(websocket: WebSocket, chunk_size: int = 150_000):
-    await websocket.accept()
-    print("🔵 WS conectado")
-
-    paused = False
-
-    async def control_channel():
-        nonlocal paused
-        try:
-            while True:
-                msg = await websocket.receive_text()
-                if msg == "PAUSE":
-                    paused = True
-                    print("⏸️ Stream pausado")
-                elif msg == "RESUME":
-                    paused = False
-                    print("▶️ Stream reanudado")
-        except WebSocketDisconnect:
-            pass
-
-    asyncio.create_task(control_channel())
+@app.websocket("/ws/tiles")
+async def tiles_ws(ws: WebSocket):
+    await ws.accept()
+    print("🔵 WS frontend conectado")
 
     try:
-        laz_files = [
-            "file1.laz",
-            "file2.laz",
-            "file3.laz"
-        ]
+        while True:
+            msg = await ws.receive_json()
 
-        for file in laz_files:
-            print(f"📦 Enviando {file}")
-            for chunk in read_chunks(file, chunk_size):
+            cam = np.array(msg["camera"], dtype=np.float64)
+            max_dist = float(msg.get("max_distance", 2500))
+            max_tiles = int(msg.get("max_tiles", 64))
 
-                while paused:
-                    await asyncio.sleep(0.05)
+            tiles = spatial.query_visible_tiles(
+                camera_pos=cam,
+                max_distance=max_dist,
+                max_tiles=max_tiles
+            )
 
-                await websocket.send_bytes(chunk)
+            for tile in tiles:
+                await ws.send_text(json.dumps({
+                    "type": "tile_meta",
+                    "tile_id": tile.tile_id,
+                    "origin": tile.origin.tolist(),
+                    "points": tile.point_count
+                }))
 
-    except WebSocketDisconnect:
-        print("🔴 WS desconectado")
+                payload = spatial.load_tile_binary(tile)
+                await ws.send_bytes(payload)
 
     except Exception as e:
-        print("❌ ERROR WS:", e)
-
-    finally:
-        print("🧹 Stream finalizado")
-
-
-app.include_router(router)
-
-# ───────────────────────────────
-# ENTRYPOINT
-# ───────────────────────────────
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-        workers=1
-    )
+        print("🔴 WS cerrado:", e)
