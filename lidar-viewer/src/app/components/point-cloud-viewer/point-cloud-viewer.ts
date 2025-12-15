@@ -30,16 +30,20 @@ export class PointCloudViewer implements OnInit, OnDestroy {
 
   private ws!: WebSocket;
 
-  // ───── DATA CACHE ─────
-  private posChunks: Float32Array[] = [];
-  private colChunks: Float32Array[] = [];
-
   // ───── OCTREE ─────
   private octree!: Octree;
   private lodDirty = false;
 
+  // ───── BACKPRESSURE ─────
+  private pendingChunks = 0;
+  private readonly MAX_PENDING = 5;
+
   ngOnInit(): void {
     this.initThree();
+
+    // 🔥 OCTREE SE CREA AQUÍ (ANTES DEL WS)
+    this.octree = new Octree();
+
     this.initWebSocket();
     this.animate();
   }
@@ -63,7 +67,7 @@ export class PointCloudViewer implements OnInit, OnDestroy {
       1e9
     );
 
-    this.camera.position.set(0, 0, 10);
+    this.camera.position.set(0, 0, 200);
 
     const material = new THREE.PointsMaterial({
       size: 1.0,
@@ -98,7 +102,7 @@ export class PointCloudViewer implements OnInit, OnDestroy {
 
     this.ws.binaryType = 'arraybuffer';
 
-    this.ws.onopen = () => console.log('[WS] conectado');
+    this.ws.onopen = () => console.log('🔵 WS conectado');
 
     this.ws.onmessage = (ev) => {
       const data = new Float32Array(ev.data);
@@ -120,35 +124,15 @@ export class PointCloudViewer implements OnInit, OnDestroy {
         col[c++] = data[i + 5];
       }
 
-      this.posChunks.push(pos);
-      this.colChunks.push(col);
-
-      // ─── MERGE ───
-      const allPos = this.merge(this.posChunks);
-      const allCol = this.merge(this.colChunks);
-
-      // 🧭 CENTRAR NUBE
-      const box = new THREE.Box3();
-      for (let i = 0; i < allPos.length; i += 3) {
-        box.expandByPoint(
-          new THREE.Vector3(
-            allPos[i],
-            allPos[i + 1],
-            allPos[i + 2]
-          )
-        );
-      }
-
-      const center = box.getCenter(new THREE.Vector3());
-
-      for (let i = 0; i < allPos.length; i += 3) {
-        allPos[i]     -= center.x;
-        allPos[i + 1] -= center.y;
-        allPos[i + 2] -= center.z;
-      }
-
-      this.octree = new Octree(allPos, allCol);
+      // ───── INSERTAR INCREMENTAL ─────
+      this.pendingChunks++;
+      this.octree.insertChunk(pos, col);
       this.lodDirty = true;
+
+      // ───── BACKPRESSURE ─────
+      if (this.pendingChunks >= this.MAX_PENDING) {
+        this.ws.send('PAUSE');
+      }
     };
   }
 
@@ -156,8 +140,6 @@ export class PointCloudViewer implements OnInit, OnDestroy {
   // LOD
   // ───────────────────────────────
   private updateLOD(): void {
-    if (!this.octree) return;
-
     const posChunks: Float32Array[] = [];
     const colChunks: Float32Array[] = [];
 
@@ -185,11 +167,9 @@ export class PointCloudViewer implements OnInit, OnDestroy {
 
     this.geometry.computeBoundingSphere();
 
-    const s = this.geometry.boundingSphere;
-    if (s) {
-      this.controls.target.set(0, 0, 0);
-      this.camera.position.set(0, 0, s.radius * 2);
-      this.camera.lookAt(0, 0, 0);
+    this.pendingChunks = Math.max(0, this.pendingChunks - 1);
+    if (this.pendingChunks < this.MAX_PENDING) {
+      this.ws.send('RESUME');
     }
 
     this.lodDirty = false;

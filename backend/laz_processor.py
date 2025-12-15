@@ -8,37 +8,51 @@ class LazProcessor:
         pass
 
     def load_laz(self, file_path: Path):
+        """
+        Carga un archivo LAZ/LAS usando laspy
+        """
         return laspy.read(file_path)
 
-    def build_buffer(self, las):
+    def extract_points(self, las):
         """
-        Devuelve un buffer binario listo para enviar por WebSocket
-        Formato por punto:
-        [x, y, z, r, g, b] -> Float32
+        Extrae XYZ y RGB normalizado (0–1)
+        NO envía buffers
+        NO concatena archivos
         """
 
-        # Coordenadas
-        x = las.x
-        y = las.y
-        z = las.z
+        xyz = np.vstack((
+            las.x,
+            las.y,
+            las.z
+        )).T.astype(np.float32)
 
-        xyz = np.vstack((x, y, z)).T.astype(np.float32)
-
-        # 🎨 COLORES LAZ (si existen)
         if hasattr(las, "red"):
             rgb = np.vstack((
                 las.red,
                 las.green,
                 las.blue
-            )).T.astype(np.float32)
-
-            # Normalizar 16 bits → 0–1
-            rgb /= 65535.0
+            )).T.astype(np.float32) / 65535.0
         else:
-            # Fallback blanco (NO rompe nada)
             rgb = np.ones_like(xyz, dtype=np.float32)
 
-        # Buffer final [x,y,z,r,g,b]
-        data = np.hstack((xyz, rgb)).astype(np.float32)
+        return xyz, rgb
 
-        return data.tobytes(), xyz.shape[0]
+    def compute_bounds(self, xyz):
+        """
+        Bounding box de un bloque
+        """
+        return xyz.min(axis=0), xyz.max(axis=0)
+
+    def extract_points(self, las):
+        xyz = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
+
+        if hasattr(las, "red"):
+            rgb = np.vstack((
+                las.red,
+                las.green,
+                las.blue
+            )).T.astype(np.uint16)
+        else:
+            rgb = np.ones_like(xyz, dtype=np.uint16) * 65535
+
+        return xyz, rgb
