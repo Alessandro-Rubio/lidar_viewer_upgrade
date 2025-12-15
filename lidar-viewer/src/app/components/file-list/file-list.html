@@ -1,0 +1,12 @@
+<div class="file-list">
+  <h3>Archivos LAZ</h3>
+  <div *ngIf="files.length === 0">Esperando backend...</div>
+  <ul>
+    <li *ngFor="let f of files" (click)="open(f)">{{ f }}</li>
+  </ul>
+
+  <div class="controls">
+    <button (click)="startAll()">Iniciar stream</button>
+    <button (click)="stopAll()">Detener</button>
+  </div>
+</div>

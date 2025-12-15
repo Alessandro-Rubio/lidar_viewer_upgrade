@@ -1,9 +1,0 @@
-.pcv-root { display:flex; flex-direction:column; height:100%; width:100%; color:#eee; font-family: Inter, Roboto, sans-serif; }
-.toolbar { display:flex; align-items:center; gap:0.5rem; padding:0.5rem; background: linear-gradient(90deg, #0b0b0b, #111); border-bottom:1px solid rgba(255,255,255,0.03); }
-.btn.small { padding:0.25rem 0.6rem; font-size:0.85rem; cursor:pointer; }
-.quality select { margin-left:0.4rem; }
-.stats-inline { margin-left:auto; font-size:0.9rem; color:#cfd8dc; display:flex; gap:0.5rem; align-items:center; }
-
-.render-container { flex:1 1 auto; position:relative; min-height:300px; background:#000; overflow:hidden; }
-
-.info-panel { padding:0.5rem; font-size:0.9rem; background:rgba(0,0,0,0.4); border-top:1px solid rgba(255,255,255,0.02); color:#d0d0d0; }
