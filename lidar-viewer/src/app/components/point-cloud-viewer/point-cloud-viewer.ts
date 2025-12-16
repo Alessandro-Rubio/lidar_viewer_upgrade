@@ -8,7 +8,7 @@ import {
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Octree } from '../../utils/octree';
+import { TileLoaderService } from '../../services/tile-loader.service';
 
 @Component({
   selector: 'app-point-cloud-viewer',
@@ -25,37 +25,46 @@ export class PointCloudViewer implements OnInit, OnDestroy {
   private renderer!: THREE.WebGLRenderer;
   private controls!: OrbitControls;
 
-  private geometry = new THREE.BufferGeometry();
-  private points!: THREE.Points;
+  private tileLoader!: TileLoaderService;
+  private loadedTiles = new Set<string>();
 
-  private ws!: WebSocket;
+  private lastCameraPos = new THREE.Vector3();
+  private tileQueryCooldown = 0;
 
-  // ───── OCTREE ─────
-  private octree!: Octree;
-  private lodDirty = false;
-
-  // ───── BACKPRESSURE ─────
-  private pendingChunks = 0;
-  private readonly MAX_PENDING = 5;
 
   ngOnInit(): void {
     this.initThree();
-
-    // 🔥 OCTREE SE CREA AQUÍ (ANTES DEL WS)
-    this.octree = new Octree();
-
-    this.initWebSocket();
+    this.tileLoader = new TileLoaderService();
+    this.bootstrapDataset();
     this.animate();
   }
 
   ngOnDestroy(): void {
-    this.ws?.close();
     this.renderer.dispose();
   }
 
-  // ───────────────────────────────
+  // ─────────────────────────────────────────────
+  // DATASET
+  // ─────────────────────────────────────────────
+
+  private async bootstrapDataset() {
+    const meta = await this.tileLoader.loadMetadata();
+
+    const center = new THREE.Vector3(
+      (meta.bounds.min[0] + meta.bounds.max[0]) * 0.5,
+      (meta.bounds.min[1] + meta.bounds.max[1]) * 0.5,
+      (meta.bounds.min[2] + meta.bounds.max[2]) * 0.5
+    );
+
+    this.camera.position.copy(center.clone().add(new THREE.Vector3(0, 0, 800)));
+    this.controls.target.copy(center);
+    this.controls.update();
+  }
+
+  // ─────────────────────────────────────────────
   // THREE
-  // ───────────────────────────────
+  // ─────────────────────────────────────────────
+
   private initThree(): void {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x000000);
@@ -66,17 +75,6 @@ export class PointCloudViewer implements OnInit, OnDestroy {
       0.1,
       1e9
     );
-
-    this.camera.position.set(0, 0, 200);
-
-    const material = new THREE.PointsMaterial({
-      size: 1.0,
-      vertexColors: true,
-      sizeAttenuation: true
-    });
-
-    this.points = new THREE.Points(this.geometry, material);
-    this.scene.add(this.points);
 
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvasRef.nativeElement
@@ -92,119 +90,84 @@ export class PointCloudViewer implements OnInit, OnDestroy {
     this.controls.enableDamping = true;
   }
 
-  // ───────────────────────────────
-  // WEBSOCKET
-  // ───────────────────────────────
-  private initWebSocket(): void {
-    this.ws = new WebSocket(
-      'ws://localhost:8000/ws/binary-stream?chunk_size=150000'
-    );
-
-    this.ws.binaryType = 'arraybuffer';
-
-    this.ws.onopen = () => console.log('🔵 WS conectado');
-
-    this.ws.onmessage = (ev) => {
-      const data = new Float32Array(ev.data);
-      const count = data.length / 6;
-
-      const pos = new Float32Array(count * 3);
-      const col = new Float32Array(count * 3);
-
-      let p = 0;
-      let c = 0;
-
-      for (let i = 0; i < data.length; i += 6) {
-        pos[p++] = data[i];
-        pos[p++] = data[i + 1];
-        pos[p++] = data[i + 2];
-
-        col[c++] = data[i + 3];
-        col[c++] = data[i + 4];
-        col[c++] = data[i + 5];
-      }
-
-      // ───── INSERTAR INCREMENTAL ─────
-      this.pendingChunks++;
-      this.octree.insertChunk(pos, col);
-      this.lodDirty = true;
-
-      // ───── BACKPRESSURE ─────
-      if (this.pendingChunks >= this.MAX_PENDING) {
-        this.ws.send('PAUSE');
-      }
-    };
-  }
-
-  // ───────────────────────────────
-  // LOD
-  // ───────────────────────────────
-  private updateLOD(): void {
-    const posChunks: Float32Array[] = [];
-    const colChunks: Float32Array[] = [];
-
-    this.octree.collectLOD(
-      this.camera,
-      this.octree.root,
-      posChunks,
-      colChunks
-    );
-
-    const pos = this.merge(posChunks);
-    const col = this.merge(colChunks);
-
-    if (pos.length === 0) return;
-
-    this.geometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(pos, 3)
-    );
-
-    this.geometry.setAttribute(
-      'color',
-      new THREE.BufferAttribute(col, 3)
-    );
-
-    this.geometry.computeBoundingSphere();
-
-    this.pendingChunks = Math.max(0, this.pendingChunks - 1);
-    if (this.pendingChunks < this.MAX_PENDING) {
-      this.ws.send('RESUME');
-    }
-
-    this.lodDirty = false;
-  }
-
-  // ───────────────────────────────
-  // UTILS
-  // ───────────────────────────────
-  private merge(arrays: Float32Array[]): Float32Array {
-    let total = 0;
-    for (const a of arrays) total += a.length;
-
-    const out = new Float32Array(total);
-    let offset = 0;
-
-    for (const a of arrays) {
-      out.set(a, offset);
-      offset += a.length;
-    }
-
-    return out;
-  }
-
-  // ───────────────────────────────
+  // ─────────────────────────────────────────────
   // LOOP
-  // ───────────────────────────────
+  // ─────────────────────────────────────────────
+
   private animate = () => {
     requestAnimationFrame(this.animate);
 
     this.controls.update();
 
-    if (this.lodDirty) {
-      this.updateLOD();
+    const moved = this.lastCameraPos.distanceToSquared(this.camera.position) > 25;
+
+    if (moved && this.tileQueryCooldown <= 0) {
+      this.updateVisibleTiles();
+      this.lastCameraPos.copy(this.camera.position);
+      this.tileQueryCooldown = 10;
     }
+
+    this.tileQueryCooldown--;
 
     this.renderer.render(this.scene, this.camera);
   };
+
+
+  // ─────────────────────────────────────────────
+  // TILE LOADING
+  // ─────────────────────────────────────────────
+
+  private async updateVisibleTiles() {
+    const box = new THREE.Box3();
+    box.setFromCenterAndSize(
+      this.controls.target,
+      new THREE.Vector3(2000, 2000, 2000)
+    );
+
+    const tiles = await this.tileLoader.requestTilesForBBox(box.min, box.max);
+
+    for (const tile of tiles) {
+      if (this.loadedTiles.has(tile.id)) continue;
+
+      this.loadedTiles.add(tile.id);
+      this.addTileToScene(tile);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // RENDER TILE
+  // ─────────────────────────────────────────────
+
+  private addTileToScene(tile: any) {
+    const data = tile.data as Float32Array;
+    const meta = tile.meta;
+
+    const count = data.length / 6;
+
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+
+    for (let i = 0; i < count; i++) {
+      positions[i * 3 + 0] = data[i * 6 + 0] + meta.origin[0];
+      positions[i * 3 + 1] = data[i * 6 + 1] + meta.origin[1];
+      positions[i * 3 + 2] = data[i * 6 + 2] + meta.origin[2];
+
+      colors[i * 3 + 0] = data[i * 6 + 3] / 255;
+      colors[i * 3 + 1] = data[i * 6 + 4] / 255;
+      colors[i * 3 + 2] = data[i * 6 + 5] / 255;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+      size: 0.5,
+      vertexColors: true,
+      sizeAttenuation: true
+    });
+
+    const points = new THREE.Points(geometry, material);
+    this.scene.add(points);
+  }
 }

@@ -1,45 +1,48 @@
-from fastapi import FastAPI, WebSocket
-from pathlib import Path
-import numpy as np
-import json
-
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from spatial_index import SpatialIndex
+from pathlib import Path
 
 app = FastAPI()
-
 spatial = SpatialIndex(Path("data/processed"))
-spatial.load()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:4200",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.websocket("/ws/tiles")
-async def tiles_ws(ws: WebSocket):
-    await ws.accept()
-    print("🔵 WS frontend conectado")
+@app.get("/dataset/metadata")
+def metadata():
+    return spatial.metadata
 
-    try:
-        while True:
-            msg = await ws.receive_json()
 
-            cam = np.array(msg["camera"], dtype=np.float64)
-            max_dist = float(msg.get("max_distance", 2500))
-            max_tiles = int(msg.get("max_tiles", 64))
+@app.get("/dataset/tiles")
+def tiles(min_x: float, min_y: float, max_x: float, max_y: float):
+    return spatial.query(min_x, min_y, max_x, max_y)
 
-            tiles = spatial.query_visible_tiles(
-                camera_pos=cam,
-                max_distance=max_dist,
-                max_tiles=max_tiles
-            )
 
-            for tile in tiles:
-                await ws.send_text(json.dumps({
-                    "type": "tile_meta",
-                    "tile_id": tile.tile_id,
-                    "origin": tile.origin.tolist(),
-                    "points": tile.point_count
-                }))
+@app.get("/dataset/tile/{tile_id}")
+def tile_data(tile_id: str):
+    path = spatial.tile_path(tile_id)
+    if not path.exists():
+        raise HTTPException(404)
 
-                payload = spatial.load_tile_binary(tile)
-                await ws.send_bytes(payload)
+    return Response(
+        content=path.read_bytes(),
+        media_type="application/octet-stream"
+    )
 
-    except Exception as e:
-        print("🔴 WS cerrado:", e)
+
+@app.get("/dataset/tile/{tile_id}/meta")
+def tile_meta(tile_id: str):
+    meta = spatial.tile_meta(tile_id)
+    if meta is None:
+        raise HTTPException(404)
+
+    return meta

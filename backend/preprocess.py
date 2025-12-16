@@ -1,6 +1,5 @@
 import json
 import math
-import struct
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -9,13 +8,12 @@ from laz_processor import LazProcessor
 
 
 # =========================
-# CONFIGURACIÓN GLOBAL
+# CONFIGURACIÓN
 # =========================
 
-TILE_SIZE_METERS = 100.0     # tamaño de tile en metros (UTM)
-MAX_POINTS_PER_TILE = 5_000_000  # límite duro de puntos por tile
+TILE_SIZE_METERS = 100.0
+MAX_POINTS_PER_TILE = 5_000_000
 OUTPUT_VERSION = "1.0"
-
 
 # =========================
 # UTILIDADES
@@ -27,7 +25,6 @@ def floor_div(a: float, b: float) -> int:
 
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
-
 
 # =========================
 # PREPROCESSOR
@@ -50,11 +47,10 @@ class LazPreprocessor:
         self.global_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
 
         self.tiles: Dict[Tuple[int, int], List[np.ndarray]] = {}
-
         self.total_points = 0
 
     # =========================
-    # FASE 1: ESCANEO GLOBAL
+    # FASE 1: BOUNDS GLOBALES
     # =========================
 
     def scan_bounds(self):
@@ -63,8 +59,7 @@ class LazPreprocessor:
         for laz_file in self.input_dir.glob("*.laz"):
             print(f"   → {laz_file.name}")
             las = self.processor.load_laz(laz_file)
-
-            xyz = np.vstack((las.x, las.y, las.z)).T
+            xyz, _ = self.processor.extract_points(las)
 
             self.global_min = np.minimum(self.global_min, xyz.min(axis=0))
             self.global_max = np.maximum(self.global_max, xyz.max(axis=0))
@@ -74,7 +69,7 @@ class LazPreprocessor:
         print(f"   MAX: {self.global_max}")
 
     # =========================
-    # FASE 2: TILEADO ESPACIAL
+    # FASE 2: TILEADO
     # =========================
 
     def process_files(self):
@@ -84,14 +79,13 @@ class LazPreprocessor:
             print(f"📦 {laz_file.name}")
 
             las = self.processor.load_laz(laz_file)
-            buffer, count = self.processor.build_buffer(las)
+            xyz, rgb = self.processor.extract_points(las)
 
-            data = np.frombuffer(buffer, dtype=np.float32)
-            data = data.reshape((-1, 6))  # x y z r g b
+            self.total_points += xyz.shape[0]
 
-            self.total_points += data.shape[0]
+            # Concatenar [x y z r g b]
+            data = np.hstack((xyz, rgb.astype(np.float32)))
 
-            # Asignar puntos a tiles
             for point in data:
                 x, y = point[0], point[1]
 
@@ -108,7 +102,7 @@ class LazPreprocessor:
         print(f"✅ Total puntos procesados: {self.total_points}")
 
     # =========================
-    # FASE 3: SERIALIZACIÓN
+    # FASE 3: ESCRITURA
     # =========================
 
     def write_tiles(self):
@@ -126,17 +120,15 @@ class LazPreprocessor:
                 print(f"⚠️ Tile {tile_id} excede límite, truncando")
                 points_np = points_np[:MAX_POINTS_PER_TILE]
 
-            # Origen del tile (UTM real)
             origin_x = self.global_min[0] + tx * TILE_SIZE_METERS
             origin_y = self.global_min[1] + ty * TILE_SIZE_METERS
             origin_z = self.global_min[2]
 
-            # Convertir a coordenadas relativas
+            # Coordenadas relativas
             points_np[:, 0] -= origin_x
             points_np[:, 1] -= origin_y
             points_np[:, 2] -= origin_z
 
-            # Guardar binario puro Float32
             with open(tile_path, "wb") as f:
                 f.write(points_np.tobytes())
 
@@ -173,7 +165,7 @@ class LazPreprocessor:
         print("✅ Dataset listo")
 
     # =========================
-    # PIPELINE COMPLETO
+    # PIPELINE
     # =========================
 
     def run(self):
@@ -181,7 +173,6 @@ class LazPreprocessor:
         self.process_files()
         tiles_metadata = self.write_tiles()
         self.write_metadata(tiles_metadata)
-
 
 # =========================
 # ENTRY POINT
