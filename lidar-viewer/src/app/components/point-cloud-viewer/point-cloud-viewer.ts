@@ -8,7 +8,7 @@ import {
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { TileLoaderService } from '../../services/tile-loader.service';
+import { TileLoaderService, LoadedTile } from '../../services/tile-loader.service';
 
 @Component({
   selector: 'app-point-cloud-viewer',
@@ -25,47 +25,50 @@ export class PointCloudViewer implements OnInit, OnDestroy {
   private renderer!: THREE.WebGLRenderer;
   private controls!: OrbitControls;
 
-  private tileLoader!: TileLoaderService;
+  private origin = new THREE.Vector3();
   private loadedTiles = new Set<string>();
 
   private lastCameraPos = new THREE.Vector3();
   private tileQueryCooldown = 0;
 
+  constructor(private tileLoader: TileLoaderService) {}
 
-  ngOnInit(): void {
+  async ngOnInit() {
     this.initThree();
-    this.tileLoader = new TileLoaderService();
-    this.bootstrapDataset();
+    await this.bootstrapDataset();
     this.animate();
   }
 
-  ngOnDestroy(): void {
+  ngOnDestroy() {
     this.renderer.dispose();
   }
 
   // ─────────────────────────────────────────────
   // DATASET
   // ─────────────────────────────────────────────
-
   private async bootstrapDataset() {
     const meta = await this.tileLoader.loadMetadata();
 
-    const center = new THREE.Vector3(
-      (meta.bounds.min[0] + meta.bounds.max[0]) * 0.5,
-      (meta.bounds.min[1] + meta.bounds.max[1]) * 0.5,
-      (meta.bounds.min[2] + meta.bounds.max[2]) * 0.5
+    const min = meta.bounds.min;
+    const max = meta.bounds.max;
+
+    this.origin.set(
+      (min[0] + max[0]) * 0.5,
+      (min[1] + max[1]) * 0.5,
+      (min[2] + max[2]) * 0.5
     );
 
-    this.camera.position.copy(center.clone().add(new THREE.Vector3(0, 0, 800)));
-    this.controls.target.copy(center);
-    this.controls.update();
+    this.camera.position.set(0, -150, 150);
+    this.camera.near = 0.01;
+    this.camera.far = 10000;
+    this.camera.updateProjectionMatrix();
+
   }
 
   // ─────────────────────────────────────────────
   // THREE
   // ─────────────────────────────────────────────
-
-  private initThree(): void {
+  private initThree() {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x000000);
 
@@ -73,7 +76,7 @@ export class PointCloudViewer implements OnInit, OnDestroy {
       60,
       window.innerWidth / window.innerHeight,
       0.1,
-      1e9
+      5000
     );
 
     this.renderer = new THREE.WebGLRenderer({
@@ -83,23 +86,24 @@ export class PointCloudViewer implements OnInit, OnDestroy {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setPixelRatio(devicePixelRatio);
 
-    this.controls = new OrbitControls(
-      this.camera,
-      this.renderer.domElement
-    );
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+
+    // DEBUG VISUAL
+    this.scene.add(new THREE.AxesHelper(50));
+    this.scene.add(new THREE.GridHelper(200, 20));
   }
 
   // ─────────────────────────────────────────────
   // LOOP
   // ─────────────────────────────────────────────
-
   private animate = () => {
     requestAnimationFrame(this.animate);
 
     this.controls.update();
 
-    const moved = this.lastCameraPos.distanceToSquared(this.camera.position) > 25;
+    const moved =
+      this.lastCameraPos.distanceToSquared(this.camera.position) > 25;
 
     if (moved && this.tileQueryCooldown <= 0) {
       this.updateVisibleTiles();
@@ -108,15 +112,12 @@ export class PointCloudViewer implements OnInit, OnDestroy {
     }
 
     this.tileQueryCooldown--;
-
     this.renderer.render(this.scene, this.camera);
   };
-
 
   // ─────────────────────────────────────────────
   // TILE LOADING
   // ─────────────────────────────────────────────
-
   private async updateVisibleTiles() {
     const box = new THREE.Box3();
     box.setFromCenterAndSize(
@@ -124,7 +125,10 @@ export class PointCloudViewer implements OnInit, OnDestroy {
       new THREE.Vector3(2000, 2000, 2000)
     );
 
-    const tiles = await this.tileLoader.requestTilesForBBox(box.min, box.max);
+    const tiles = await this.tileLoader.requestTilesForBBox(
+      box.min,
+      box.max
+    );
 
     for (const tile of tiles) {
       if (this.loadedTiles.has(tile.id)) continue;
@@ -137,37 +141,49 @@ export class PointCloudViewer implements OnInit, OnDestroy {
   // ─────────────────────────────────────────────
   // RENDER TILE
   // ─────────────────────────────────────────────
-
-  private addTileToScene(tile: any) {
-    const data = tile.data as Float32Array;
+   private addTileToScene(tile: LoadedTile) {
+    const data = tile.data;
     const meta = tile.meta;
 
-    const count = data.length / 6;
+    // ⚠️ SOLO XYZ
+    const count = data.length / 3;
+
+    if (count === 0) {
+      console.warn('Tile vacío:', tile.id);
+      return;
+    }
 
     const positions = new Float32Array(count * 3);
-    const colors = new Float32Array(count * 3);
 
     for (let i = 0; i < count; i++) {
-      positions[i * 3 + 0] = data[i * 6 + 0] + meta.origin[0];
-      positions[i * 3 + 1] = data[i * 6 + 1] + meta.origin[1];
-      positions[i * 3 + 2] = data[i * 6 + 2] + meta.origin[2];
+      positions[i * 3 + 0] =
+        data[i * 3 + 0] + meta.origin[0] - this.origin.x;
 
-      colors[i * 3 + 0] = data[i * 6 + 3] / 255;
-      colors[i * 3 + 1] = data[i * 6 + 4] / 255;
-      colors[i * 3 + 2] = data[i * 6 + 5] / 255;
+      positions[i * 3 + 1] =
+        data[i * 3 + 1] + meta.origin[1] - this.origin.y;
+
+      positions[i * 3 + 2] =
+        data[i * 3 + 2] + meta.origin[2] - this.origin.z;
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions, 3)
+    );
 
     const material = new THREE.PointsMaterial({
-      size: 0.5,
-      vertexColors: true,
+      size: 2.0,
+      color: 0xffffff,
       sizeAttenuation: true
     });
 
     const points = new THREE.Points(geometry, material);
     this.scene.add(points);
+
+    console.log(
+      `Tile ${tile.id} renderizado (${count.toLocaleString()} puntos)`
+    );
   }
+
 }

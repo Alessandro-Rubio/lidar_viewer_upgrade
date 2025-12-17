@@ -1,4 +1,7 @@
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
 import * as THREE from 'three';
+import { firstValueFrom } from 'rxjs';
 
 export interface LoadedTile {
   id: string;
@@ -6,27 +9,34 @@ export interface LoadedTile {
   meta: any;
 }
 
+@Injectable({
+  providedIn: 'root'
+})
 export class TileLoaderService {
 
   private baseUrl = 'http://localhost:8000/dataset';
+
   private metadata: any = null;
+  private tileCache = new Map<string, LoadedTile>();
+
+  constructor(private http: HttpClient) {}
 
   // ─────────────────────────────────────────────
   // METADATA
   // ─────────────────────────────────────────────
-
   async loadMetadata(): Promise<any> {
     if (this.metadata) return this.metadata;
 
-    const res = await fetch(`${this.baseUrl}/metadata`);
-    this.metadata = await res.json();
+    this.metadata = await firstValueFrom(
+      this.http.get<any>(`${this.baseUrl}/metadata`)
+    );
+
     return this.metadata;
   }
 
   // ─────────────────────────────────────────────
   // TILE QUERY
   // ─────────────────────────────────────────────
-
   async requestTilesForBBox(
     min: THREE.Vector3,
     max: THREE.Vector3
@@ -37,45 +47,47 @@ export class TileLoaderService {
       `?min_x=${min.x}&min_y=${min.y}` +
       `&max_x=${max.x}&max_y=${max.y}`;
 
-    const res = await fetch(url);
-    const tileIds: string[] = await res.json();
+    const tileIds = await firstValueFrom(
+      this.http.get<string[]>(url)
+    );
 
-    const tiles: LoadedTile[] = [];
+    const result: LoadedTile[] = [];
 
     for (const id of tileIds) {
+      if (this.tileCache.has(id)) {
+        result.push(this.tileCache.get(id)!);
+        continue;
+      }
+
       const tile = await this.loadTile(id);
-      tiles.push(tile);
+      this.tileCache.set(id, tile);
+      result.push(tile);
     }
 
-    return tiles;
+    return result;
   }
 
   // ─────────────────────────────────────────────
   // TILE LOAD
   // ─────────────────────────────────────────────
+  private async loadTile(id: string): Promise<LoadedTile> {
 
-  async loadTile(id: string): Promise<LoadedTile> {
+    const buffer = await firstValueFrom(
+      this.http.get(
+        `${this.baseUrl}/tile/${id}`,
+        { responseType: 'arraybuffer' }
+      )
+    );
 
-  const [binRes, metaRes] = await Promise.all([
-    fetch(`${this.baseUrl}/tile/${id}`),
-    fetch(`${this.baseUrl}/tile/${id}/meta`)
-  ]);
+    const meta = this.metadata.tiles[id];
+    if (!meta?.origin) {
+      throw new Error(`Tile ${id} sin metadata/origin`);
+    }
 
-  const buffer = await binRes.arrayBuffer();
-  const meta = await metaRes.json();
-
-  // VALIDACIÓN CRÍTICA
-  if (!meta.origin) {
-    throw new Error(`Tile ${id} sin origin`);
+    return {
+      id,
+      data: new Float32Array(buffer),
+      meta
+    };
   }
-
-  const data = new Float32Array(buffer);
-
-  return {
-    id,
-    data,
-    meta
-  };
-}
-
 }
