@@ -1,86 +1,78 @@
+import json
 from pathlib import Path
-from typing import Iterator, List, Tuple
-import numpy as np
+from typing import Dict, List
 
-from laz_processor import LazProcessor
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+PROCESSED_DIR = DATA_DIR / "processed"
+TILES_DIR = PROCESSED_DIR / "tiles"
+METADATA_PATH = PROCESSED_DIR / "metadata.json"
 
 
 class DatasetLoader:
-    """
-    Carga y preprocesa un conjunto completo de archivos LAZ.
+    def __init__(self):
+        if not METADATA_PATH.exists():
+            raise FileNotFoundError("metadata.json no encontrado")
 
-    Objetivos de diseño:
-    - NO streaming en vivo
-    - Preprocesar completamente en backend
-    - Preparar datos para visualización progresiva / LOD
-    - Escalable a cientos de archivos y miles de millones de puntos
-    """
+        if not TILES_DIR.exists():
+            raise FileNotFoundError("Carpeta tiles no encontrada")
 
-    def __init__(self, data_dir: Path):
-        self.data_dir = Path(data_dir)
-        self.processor = LazProcessor()
+        # 🔹 Cargar metadata UNA sola vez
+        with open(METADATA_PATH, "r") as f:
+            self.metadata: Dict = json.load(f)
 
-        if not self.data_dir.exists():
-            raise FileNotFoundError(f"Directorio no encontrado: {self.data_dir}")
-
-        self.files: List[Path] = sorted(
-            [p for p in self.data_dir.iterdir() if p.suffix.lower() == ".laz"]
-        )
-
-        if not self.files:
-            raise RuntimeError("No se encontraron archivos .laz en el directorio")
+        self.tile_size: float = float(self.metadata["tile_size"])
+        self.bounds_min = self.metadata["bounds"]["min"]
+        self.tiles_meta: Dict[str, Dict] = self.metadata["tiles"]
 
     # ─────────────────────────────────────────────
-    # API PRINCIPAL
+    # METADATA
     # ─────────────────────────────────────────────
-    def load_all(self) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
-        """
-        Itera archivo por archivo y devuelve bloques de puntos.
 
-        Yields:
-            xyz: np.ndarray (N,3) float32 (UTM real)
-            rgb: np.ndarray (N,3) float32 (0–1)
-
-        NOTA:
-        No concatena todo en memoria.
-        Esto es CRÍTICO para datasets grandes.
-        """
-        for path in self.files:
-            las = self.processor.load_laz(path)
-            xyz, rgb = self._extract_arrays(las)
-            yield xyz, rgb
+    def get_metadata(self) -> Dict:
+        return self.metadata
 
     # ─────────────────────────────────────────────
-    # EXTRACCIÓN
+    # TILE LOOKUP
     # ─────────────────────────────────────────────
-    def _extract_arrays(self, las) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Extrae coordenadas y color como arrays separados.
-        No genera buffers binarios aquí.
-        """
-        x = las.x.astype(np.float32)
-        y = las.y.astype(np.float32)
-        z = las.z.astype(np.float32)
 
-        xyz = np.stack((x, y, z), axis=1)
+    def tiles_for_bbox(
+        self,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float
+    ) -> List[str]:
+        origin_x = self.bounds_min[0]
+        origin_y = self.bounds_min[1]
 
-        if hasattr(las, "red"):
-            r = las.red.astype(np.float32)
-            g = las.green.astype(np.float32)
-            b = las.blue.astype(np.float32)
-            rgb = np.stack((r, g, b), axis=1) / 65535.0
-        else:
-            rgb = np.ones_like(xyz, dtype=np.float32)
+        tx_min = int((min_x - origin_x) // self.tile_size)
+        ty_min = int((min_y - origin_y) // self.tile_size)
+        tx_max = int((max_x - origin_x) // self.tile_size)
+        ty_max = int((max_y - origin_y) // self.tile_size)
 
-        return xyz, rgb
+        visible_tiles: List[str] = []
+
+        for tx in range(tx_min, tx_max + 1):
+            for ty in range(ty_min, ty_max + 1):
+                tile_id = f"{tx}_{ty}"
+                if tile_id in self.tiles_meta:
+                    visible_tiles.append(tile_id)
+
+        return visible_tiles
 
     # ─────────────────────────────────────────────
-    # UTILIDADES
+    # TILE IO
     # ─────────────────────────────────────────────
-    def count_points(self) -> int:
-        """Cuenta puntos sin cargarlos todos en memoria."""
-        total = 0
-        for path in self.files:
-            las = self.processor.load_laz(path)
-            total += len(las.x)
-        return total
+
+    def tile_path(self, tile_id: str) -> Path:
+        path = TILES_DIR / f"{tile_id}.bin"
+        if not path.exists():
+            raise FileNotFoundError(f"Tile {tile_id} no existe")
+        return path
+
+    def tile_metadata(self, tile_id: str) -> Dict:
+        if tile_id not in self.tiles_meta:
+            raise KeyError(f"Tile {tile_id} sin metadata")
+        return self.tiles_meta[tile_id]

@@ -1,23 +1,18 @@
 import json
 import math
+import gc
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
-from laz_processor import LazProcessor
+import laspy
 
-
-# =========================
-# CONFIGURACIÓN
-# =========================
 
 TILE_SIZE_METERS = 100.0
 MAX_POINTS_PER_TILE = 5_000_000
 OUTPUT_VERSION = "1.0"
+CHUNK_SIZE = 2_000_000  # puntos por chunk
 
-# =========================
-# UTILIDADES
-# =========================
 
 def floor_div(a: float, b: float) -> int:
     return int(math.floor(a / b))
@@ -26,28 +21,22 @@ def floor_div(a: float, b: float) -> int:
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
-# =========================
-# PREPROCESSOR
-# =========================
 
 class LazPreprocessor:
 
     def __init__(self, input_dir: Path, output_dir: Path):
         self.input_dir = input_dir
         self.output_dir = output_dir
-
         self.tiles_dir = output_dir / "tiles"
 
         ensure_dir(self.output_dir)
         ensure_dir(self.tiles_dir)
 
-        self.processor = LazProcessor()
-
         self.global_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
         self.global_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
 
-        self.tiles: Dict[Tuple[int, int], List[np.ndarray]] = {}
         self.total_points = 0
+        self.tile_point_counts: Dict[str, int] = {}
 
     # =========================
     # FASE 1: BOUNDS GLOBALES
@@ -58,18 +47,23 @@ class LazPreprocessor:
 
         for laz_file in self.input_dir.glob("*.laz"):
             print(f"   → {laz_file.name}")
-            las = self.processor.load_laz(laz_file)
-            xyz, _ = self.processor.extract_points(las)
 
-            self.global_min = np.minimum(self.global_min, xyz.min(axis=0))
-            self.global_max = np.maximum(self.global_max, xyz.max(axis=0))
+            with laspy.open(laz_file) as reader:
+                for points in reader.chunk_iterator(CHUNK_SIZE):
+                    xyz = np.vstack((points.x, points.y, points.z)).T
+
+                    self.global_min = np.minimum(self.global_min, xyz.min(axis=0))
+                    self.global_max = np.maximum(self.global_max, xyz.max(axis=0))
+
+                    del xyz, points
+                    gc.collect()
 
         print("✅ Bounds globales:")
         print(f"   MIN: {self.global_min}")
         print(f"   MAX: {self.global_max}")
 
     # =========================
-    # FASE 2: TILEADO
+    # FASE 2: TILEADO STREAMING
     # =========================
 
     def process_files(self):
@@ -78,75 +72,72 @@ class LazPreprocessor:
         for laz_file in self.input_dir.glob("*.laz"):
             print(f"📦 {laz_file.name}")
 
-            las = self.processor.load_laz(laz_file)
-            xyz, rgb = self.processor.extract_points(las)
+            with laspy.open(laz_file) as reader:
+                for points in reader.chunk_iterator(CHUNK_SIZE):
 
-            self.total_points += xyz.shape[0]
+                    xyz = np.vstack((points.x, points.y, points.z)).T.astype(np.float32)
 
-            # Concatenar [x y z r g b]
-            data = np.hstack((xyz, rgb.astype(np.float32)))
+                    rgb = np.vstack((
+                        points.red,
+                        points.green,
+                        points.blue
+                    )).T.astype(np.float32)
 
-            for point in data:
-                x, y = point[0], point[1]
+                    data = np.hstack((xyz, rgb))
+                    self.total_points += data.shape[0]
 
-                tx = floor_div(x - self.global_min[0], TILE_SIZE_METERS)
-                ty = floor_div(y - self.global_min[1], TILE_SIZE_METERS)
+                    # Calcular tiles vectorizado
+                    tx = np.floor((xyz[:, 0] - self.global_min[0]) / TILE_SIZE_METERS).astype(np.int32)
+                    ty = np.floor((xyz[:, 1] - self.global_min[1]) / TILE_SIZE_METERS).astype(np.int32)
 
-                key = (tx, ty)
+                    for tile_x, tile_y in np.unique(np.column_stack((tx, ty)), axis=0):
+                        mask = (tx == tile_x) & (ty == tile_y)
+                        tile_points = data[mask]
 
-                if key not in self.tiles:
-                    self.tiles[key] = []
+                        tile_id = f"{tile_x}_{tile_y}"
+                        tile_path = self.tiles_dir / f"{tile_id}.bin"
 
-                self.tiles[key].append(point)
+                        # Limitar puntos por tile
+                        count = self.tile_point_counts.get(tile_id, 0)
+                        if count >= MAX_POINTS_PER_TILE:
+                            continue
+
+                        remaining = MAX_POINTS_PER_TILE - count
+                        tile_points = tile_points[:remaining]
+
+                        # Escribir incremental
+                        with open(tile_path, "ab") as f:
+                            f.write(tile_points.tobytes())
+
+                        self.tile_point_counts[tile_id] = count + tile_points.shape[0]
+
+                    del xyz, rgb, data, points
+                    gc.collect()
 
         print(f"✅ Total puntos procesados: {self.total_points}")
 
     # =========================
-    # FASE 3: ESCRITURA
+    # FASE 3: METADATA
     # =========================
 
-    def write_tiles(self):
-        print("💾 Escribiendo tiles...")
+    def write_metadata(self):
+        print("🧾 Escribiendo metadata...")
 
-        metadata_tiles = {}
+        tiles_meta = {}
 
-        for (tx, ty), points in self.tiles.items():
-            tile_id = f"{tx}_{ty}"
-            tile_path = self.tiles_dir / f"{tile_id}.bin"
-
-            points_np = np.array(points, dtype=np.float32)
-
-            if points_np.shape[0] > MAX_POINTS_PER_TILE:
-                print(f"⚠️ Tile {tile_id} excede límite, truncando")
-                points_np = points_np[:MAX_POINTS_PER_TILE]
+        for tile_id, count in self.tile_point_counts.items():
+            tx, ty = map(int, tile_id.split("_"))
 
             origin_x = self.global_min[0] + tx * TILE_SIZE_METERS
             origin_y = self.global_min[1] + ty * TILE_SIZE_METERS
             origin_z = self.global_min[2]
 
-            # Coordenadas relativas
-            points_np[:, 0] -= origin_x
-            points_np[:, 1] -= origin_y
-            points_np[:, 2] -= origin_z
-
-            with open(tile_path, "wb") as f:
-                f.write(points_np.tobytes())
-
-            metadata_tiles[tile_id] = {
+            tiles_meta[tile_id] = {
                 "tx": tx,
                 "ty": ty,
                 "origin": [origin_x, origin_y, origin_z],
-                "points": int(points_np.shape[0])
+                "points": count
             }
-
-        return metadata_tiles
-
-    # =========================
-    # FASE 4: METADATA
-    # =========================
-
-    def write_metadata(self, tiles_metadata: Dict):
-        print("🧾 Escribiendo metadata...")
 
         metadata = {
             "version": OUTPUT_VERSION,
@@ -156,7 +147,7 @@ class LazPreprocessor:
                 "max": self.global_max.tolist()
             },
             "total_points": self.total_points,
-            "tiles": tiles_metadata
+            "tiles": tiles_meta
         }
 
         with open(self.output_dir / "metadata.json", "w") as f:
@@ -171,16 +162,11 @@ class LazPreprocessor:
     def run(self):
         self.scan_bounds()
         self.process_files()
-        tiles_metadata = self.write_tiles()
-        self.write_metadata(tiles_metadata)
+        self.write_metadata()
 
-# =========================
-# ENTRY POINT
-# =========================
 
 if __name__ == "__main__":
     INPUT = Path("data")
     OUTPUT = Path("data/processed")
 
-    pre = LazPreprocessor(INPUT, OUTPUT)
-    pre.run()
+    LazPreprocessor(INPUT, OUTPUT).run()
