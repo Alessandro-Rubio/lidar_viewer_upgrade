@@ -1,6 +1,11 @@
 :host {
   display: block;
   width: 100%;
-  height: 100vh;
+  height: 100%;
 }
-.viewer { width: 100%; height: 100%; background: #000; }
+
+.viewer-container {
+  width: 100%;
+  height: 100vh;  // crítico: da altura real
+  overflow: hidden;
+}

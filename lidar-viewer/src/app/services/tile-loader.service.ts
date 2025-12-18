@@ -1,89 +1,71 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { lastValueFrom } from 'rxjs';
+import { firstValueFrom } from 'rxjs';
 
-export interface DatasetMetadata {
-  bounds: {
-    min: [number, number, number];
-    max: [number, number, number];
-  };
-  tile_size: number;
-  tiles: Record<string, {
-    tx: number;
-    ty: number;
-    origin: [number, number, number];
-    points: number;
-  }>;
+export interface LoadedTile {
+  id: string;
+  positions: Float32Array;
+  colors: Float32Array;
 }
 
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable({ providedIn: 'root' })
 export class TileLoaderService {
 
-  private baseUrl = 'http://localhost:8000/dataset';
+  private readonly BASE = 'http://localhost:8000/dataset';
 
   constructor(private http: HttpClient) {}
 
-  // -------------------------------
-  // METADATA
-  // -------------------------------
-  async loadMetadata(): Promise<DatasetMetadata> {
-
-    const meta = await lastValueFrom(
-      this.http.get<DatasetMetadata>(`${this.baseUrl}/metadata`)
-    );
-
-    if (!meta) {
-      throw new Error('Metadata vacío');
-    }
-
-    return meta;
-  }
-
-  // -------------------------------
-  // TILE LIST
-  // -------------------------------
-  async requestTilesForBBox(
+  async requestTiles(
     minX: number,
     minY: number,
     maxX: number,
     maxY: number
   ): Promise<string[]> {
 
-    const tiles = await lastValueFrom(
-      this.http.get<string[]>(
-        `${this.baseUrl}/tiles`,
-        {
-          params: {
-            min_x: minX,
-            min_y: minY,
-            max_x: maxX,
-            max_y: maxY
-          }
+    return await firstValueFrom(
+      this.http.get<string[]>(`${this.BASE}/tiles`, {
+        params: {
+          min_x: minX,
+          min_y: minY,
+          max_x: maxX,
+          max_y: maxY
         }
-      )
+      })
     );
-
-    return tiles ?? [];
   }
 
-  // -------------------------------
-  // TILE BINARY (✔ FIX DEFINITIVO)
-  // -------------------------------
-  async loadTile(tileId: string): Promise<Float32Array> {
+  async loadTile(id: string): Promise<LoadedTile> {
 
-    const buffer = await lastValueFrom(
+    const buffer = await firstValueFrom(
       this.http.get(
-        `${this.baseUrl}/tile/${tileId}`,
-        { responseType: 'arraybuffer' }
+        `${this.BASE}/tile/${id}`,
+        { responseType: 'arraybuffer' as const }
       )
     );
 
-    if (!(buffer instanceof ArrayBuffer)) {
-      throw new Error(`Tile ${tileId} no es ArrayBuffer`);
+    const data = new Float32Array(buffer);
+    const count = data.length / 6;
+
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+
+    let p = 0;
+    let c = 0;
+
+    for (let i = 0; i < data.length; i += 6) {
+      positions[p++] = data[i];
+      positions[p++] = data[i+1];
+      positions[p++] = data[i+2];
+
+      colors[c++] = data[i+3] / 65535;
+      colors[c++] = data[i+4] / 65535;
+      colors[c++] = data[i+5] / 65535;
     }
 
-    return new Float32Array(buffer);
+    return {
+      id,
+      positions,
+      colors
+    };
   }
 }

@@ -1,161 +1,140 @@
 import {
   Component,
-  OnInit,
-  OnDestroy,
   ElementRef,
-  ViewChild
+  ViewChild,
+  AfterViewInit,
+  OnDestroy
 } from '@angular/core';
 
 import * as THREE from 'three';
-import { TileLoaderService, DatasetMetadata } from '../../services/tile-loader.service';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+
+import { TileLoaderService, LoadedTile } from '../../services/tile-loader.service';
 
 @Component({
   selector: 'app-point-cloud-viewer',
   templateUrl: './point-cloud-viewer.html',
   styleUrls: ['./point-cloud-viewer.scss']
 })
-export class PointCloudViewer implements OnInit, OnDestroy {
+export class PointCloudViewer implements AfterViewInit, OnDestroy {
 
-  @ViewChild('canvas', { static: true })
-  canvasRef!: ElementRef<HTMLCanvasElement>;
+  @ViewChild('rendererContainer', { static: true })
+  rendererContainer!: ElementRef<HTMLDivElement>;
 
-  private scene!: THREE.Scene;
-  private camera!: THREE.PerspectiveCamera;
   private renderer!: THREE.WebGLRenderer;
+  private camera!: THREE.PerspectiveCamera;
+  private scene!: THREE.Scene;
+  private controls!: OrbitControls;
 
-  private datasetOrigin = new THREE.Vector3();
-  private visibleTiles = new Set<string>();
-  private metadata!: DatasetMetadata;
+  private tiles = new Map<string, THREE.Points>();
 
-  private animationId = 0;
+  private animId = 0;
 
-  constructor(private tileLoader: TileLoaderService) {}
+  constructor(private loader: TileLoaderService) {}
 
-  async ngOnInit() {
-    console.log('Attempting initialization');
-
+  ngAfterViewInit(): void {
     this.initThree();
-    await this.loadDataset();
-    this.animate();
+    this.loadInitialTiles();
   }
 
-  ngOnDestroy() {
-    cancelAnimationFrame(this.animationId);
-    this.renderer.dispose();
+  ngOnDestroy(): void {
+    cancelAnimationFrame(this.animId);
   }
 
-  // ------------------------------------
-  // THREE SETUP
-  // ------------------------------------
+  // ---------------------------------------------------
+  // THREE INIT
+  // ---------------------------------------------------
 
-  private initThree() {
+  private initThree(): void {
+
+    const el = this.rendererContainer.nativeElement;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x000000);
 
     this.camera = new THREE.PerspectiveCamera(
       60,
-      window.innerWidth / window.innerHeight,
-      0.01,
-      5000
+      el.clientWidth / el.clientHeight,
+      0.1,
+      2000000
     );
 
-    this.camera.position.set(0, -200, 200);
+    // FIX – camera elevated so grid is visible
+    this.camera.position.set(0, 150, 250);
     this.camera.lookAt(0, 0, 0);
 
-    this.renderer = new THREE.WebGLRenderer({
-      canvas: this.canvasRef.nativeElement,
-      antialias: true
-    });
-
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(el.clientWidth, el.clientHeight);
+    el.appendChild(this.renderer.domElement);
 
-    // Grid (debug)
-    const grid = new THREE.GridHelper(400, 40, 0x444444, 0x222222);
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+
+    // grid visible properly
+    const grid = new THREE.GridHelper(500, 50);
     this.scene.add(grid);
+
+    window.addEventListener('resize', () => this.onResize());
+
+    this.animate();
   }
 
-  // ------------------------------------
-  // DATASET
-  // ------------------------------------
+  private onResize(): void {
+    const el = this.rendererContainer.nativeElement;
 
-  private async loadDataset() {
+    this.camera.aspect = el.clientWidth / el.clientHeight;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(el.clientWidth, el.clientHeight);
+  }
 
-    this.metadata = await this.tileLoader.loadMetadata();
+  // ---------------------------------------------------
+  // TILES
+  // ---------------------------------------------------
 
-    this.datasetOrigin.set(
-      this.metadata.bounds.min[0],
-      this.metadata.bounds.min[1],
-      this.metadata.bounds.min[2]
-    );
+  private async loadInitialTiles(): Promise<void> {
 
-    const tiles = await this.tileLoader.requestTilesForBBox(
-      this.metadata.bounds.min[0],
-      this.metadata.bounds.min[1],
-      this.metadata.bounds.max[0],
-      this.metadata.bounds.max[1]
-    );
+    const ids = await this.loader.requestTiles(-1000, -1000, 1000, 1000);
 
-    for (const tileId of tiles) {
-      await this.loadAndAddTile(tileId);
+    for (const id of ids) {
+      const tile = await this.loader.loadTile(id);
+      if (tile) {
+        this.addTile(tile);
+      }
     }
   }
 
-  private async loadAndAddTile(tileId: string) {
+  private addTile(tile: LoadedTile): void {
 
-    if (this.visibleTiles.has(tileId)) return;
-    this.visibleTiles.add(tileId);
+  const geometry = new THREE.BufferGeometry();
 
-    const data = await this.tileLoader.loadTile(tileId);
-    this.addTileToScene(tileId, data);
-  }
+  geometry.setAttribute(
+    'position',
+    new THREE.BufferAttribute(tile.positions, 3)
+  );
 
-  // ------------------------------------
-  // TILE RENDER
-  // ------------------------------------
+  geometry.setAttribute(
+    'color',
+    new THREE.BufferAttribute(tile.colors, 3)
+  );
 
-  private addTileToScene(tileId: string, data: Float32Array) {
+  const material = new THREE.PointsMaterial({
+    size: 1,
+    vertexColors: true
+  });
 
-    const count = data.length / 3;
+  const points = new THREE.Points(geometry, material);
 
-    if (count === 0) {
-      console.warn('Tile vacío:', tileId);
-      return;
-    }
+  this.scene.add(points);
+}
 
-    const positions = new Float32Array(count * 3);
 
-    for (let i = 0; i < count; i++) {
-      positions[i * 3 + 0] = data[i * 3 + 0] - this.datasetOrigin.x;
-      positions[i * 3 + 1] = data[i * 3 + 1] - this.datasetOrigin.y;
-      positions[i * 3 + 2] = data[i * 3 + 2] - this.datasetOrigin.z;
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(positions, 3)
-    );
-
-    const material = new THREE.PointsMaterial({
-      size: 1.2,
-      color: 0xffffff,
-      sizeAttenuation: true
-    });
-
-    const points = new THREE.Points(geometry, material);
-    this.scene.add(points);
-
-    console.log(`Tile ${tileId} renderizado → ${count.toLocaleString()} pts`);
-  }
-
-  // ------------------------------------
+  // ---------------------------------------------------
   // LOOP
-  // ------------------------------------
+  // ---------------------------------------------------
 
-  private animate = () => {
-    this.animationId = requestAnimationFrame(this.animate);
+  private animate(): void {
+    this.animId = requestAnimationFrame(() => this.animate());
+    this.controls.update();
     this.renderer.render(this.scene, this.camera);
-  };
+  }
 }
