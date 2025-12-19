@@ -1,140 +1,110 @@
 import {
+  AfterViewInit,
   Component,
   ElementRef,
   ViewChild,
-  AfterViewInit,
-  OnDestroy
 } from '@angular/core';
-
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-
-import { TileLoaderService, LoadedTile } from '../../services/tile-loader.service';
+import { TileLoaderService } from '../../services/tile-loader.service';
 
 @Component({
   selector: 'app-point-cloud-viewer',
-  templateUrl: './point-cloud-viewer.html',
-  styleUrls: ['./point-cloud-viewer.scss']
+  template: `<div #container class="viewer"></div>`,
+  styles: [
+    `
+      .viewer {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+    `,
+  ],
 })
-export class PointCloudViewer implements AfterViewInit, OnDestroy {
+export class PointCloudViewer implements AfterViewInit {
+  @ViewChild('container', { static: true }) container!: ElementRef;
 
-  @ViewChild('rendererContainer', { static: true })
-  rendererContainer!: ElementRef<HTMLDivElement>;
-
-  private renderer!: THREE.WebGLRenderer;
-  private camera!: THREE.PerspectiveCamera;
   private scene!: THREE.Scene;
-  private controls!: OrbitControls;
+  private camera!: THREE.PerspectiveCamera;
+  private renderer!: THREE.WebGLRenderer;
 
-  private tiles = new Map<string, THREE.Points>();
+  constructor(private tileLoader: TileLoaderService) {}
 
-  private animId = 0;
+  async ngAfterViewInit(): Promise<void> {
+  const metadata = await this.tileLoader.loadMetadata();
 
-  constructor(private loader: TileLoaderService) {}
+  const tiles = this.tileLoader.getTileIds();
+  console.log('Tiles encontrados:', tiles.length);
 
-  ngAfterViewInit(): void {
-    this.initThree();
-    this.loadInitialTiles();
+  for (const tileId of tiles.slice(0, 5)) {
+
+    const buffer = await this.tileLoader.loadTile(tileId);
+
+    // 🔴 LOG CRÍTICO (AQUÍ MISMO)
+    console.log(`[Tile ${tileId}] bytes:`, buffer?.byteLength);
+
+    if (!buffer || buffer.byteLength === 0) {
+      console.error(`Tile ${tileId} vacío o inválido`);
+      continue;
+    }
+
+    this.addTileToScene(tileId, buffer);
   }
+}
 
-  ngOnDestroy(): void {
-    cancelAnimationFrame(this.animId);
-  }
 
-  // ---------------------------------------------------
-  // THREE INIT
-  // ---------------------------------------------------
-
-  private initThree(): void {
-
-    const el = this.rendererContainer.nativeElement;
+  private initThree() {
+    const width = this.container.nativeElement.clientWidth;
+    const height = this.container.nativeElement.clientHeight;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x000000);
 
-    this.camera = new THREE.PerspectiveCamera(
-      60,
-      el.clientWidth / el.clientHeight,
-      0.1,
-      2000000
-    );
-
-    // FIX – camera elevated so grid is visible
-    this.camera.position.set(0, 150, 250);
-    this.camera.lookAt(0, 0, 0);
+    this.camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 100000);
+    this.camera.position.set(0, 0, 100);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
-    this.renderer.setSize(el.clientWidth, el.clientHeight);
-    el.appendChild(this.renderer.domElement);
+    this.renderer.setSize(width, height);
 
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-
-    // grid visible properly
-    const grid = new THREE.GridHelper(500, 50);
-    this.scene.add(grid);
-
-    window.addEventListener('resize', () => this.onResize());
-
-    this.animate();
+    this.container.nativeElement.appendChild(this.renderer.domElement);
   }
 
-  private onResize(): void {
-    const el = this.rendererContainer.nativeElement;
+  private addTileToScene(tileId: string, buffer: ArrayBuffer): void {
+    // BIN = [x, y, z, r, g, b] float32
+    const data = new Float32Array(buffer);
+    const points = data.length / 6;
 
-    this.camera.aspect = el.clientWidth / el.clientHeight;
-    this.camera.updateProjectionMatrix();
-    this.renderer.setSize(el.clientWidth, el.clientHeight);
-  }
+    const positions = new Float32Array(points * 3);
+    const colors = new Float32Array(points * 3);
 
-  // ---------------------------------------------------
-  // TILES
-  // ---------------------------------------------------
+    for (let i = 0; i < points; i++) {
+      positions[i * 3] = data[i * 6];
+      positions[i * 3 + 1] = data[i * 6 + 1];
+      positions[i * 3 + 2] = data[i * 6 + 2];
 
-  private async loadInitialTiles(): Promise<void> {
-
-    const ids = await this.loader.requestTiles(-1000, -1000, 1000, 1000);
-
-    for (const id of ids) {
-      const tile = await this.loader.loadTile(id);
-      if (tile) {
-        this.addTile(tile);
-      }
+      colors[i * 3] = data[i * 6 + 3] / 255;
+      colors[i * 3 + 1] = data[i * 6 + 4] / 255;
+      colors[i * 3 + 2] = data[i * 6 + 5] / 255;
     }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions, 3)
+    );
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+      size: 0.3,
+      vertexColors: true,
+    });
+
+    const cloud = new THREE.Points(geometry, material);
+    this.scene.add(cloud);
   }
 
-  private addTile(tile: LoadedTile): void {
-
-  const geometry = new THREE.BufferGeometry();
-
-  geometry.setAttribute(
-    'position',
-    new THREE.BufferAttribute(tile.positions, 3)
-  );
-
-  geometry.setAttribute(
-    'color',
-    new THREE.BufferAttribute(tile.colors, 3)
-  );
-
-  const material = new THREE.PointsMaterial({
-    size: 1,
-    vertexColors: true
-  });
-
-  const points = new THREE.Points(geometry, material);
-
-  this.scene.add(points);
-}
-
-
-  // ---------------------------------------------------
-  // LOOP
-  // ---------------------------------------------------
-
-  private animate(): void {
-    this.animId = requestAnimationFrame(() => this.animate());
-    this.controls.update();
+  private animate = () => {
+    requestAnimationFrame(this.animate);
     this.renderer.render(this.scene, this.camera);
-  }
+  };
+  
 }

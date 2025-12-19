@@ -2,70 +2,40 @@ import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 
-export interface LoadedTile {
-  id: string;
-  positions: Float32Array;
-  colors: Float32Array;
+export interface Metadata {
+  min: number[];
+  max: number[];
 }
 
-@Injectable({ providedIn: 'root' })
+@Injectable({
+  providedIn: 'root',
+})
 export class TileLoaderService {
-
-  private readonly BASE = 'http://localhost:8000/dataset';
+  private baseUrl = 'http://localhost:8000/data/processed';
+  private metadata!: Metadata;
 
   constructor(private http: HttpClient) {}
 
-  async requestTiles(
-    minX: number,
-    minY: number,
-    maxX: number,
-    maxY: number
-  ): Promise<string[]> {
-
-    return await firstValueFrom(
-      this.http.get<string[]>(`${this.BASE}/tiles`, {
-        params: {
-          min_x: minX,
-          min_y: minY,
-          max_x: maxX,
-          max_y: maxY
-        }
-      })
+  async loadMetadata(): Promise<Metadata> {
+    this.metadata = await firstValueFrom(
+      this.http.get<Metadata>(`${this.baseUrl}/metadata.json`)
     );
+    console.log('Metadata cargado:', this.metadata);
+    return this.metadata;
   }
 
-  async loadTile(id: string): Promise<LoadedTile> {
+  getTileIds(): string[] {
+    // metadata.tiles es un objeto: { "13_8": {...}, ... }
+    return Object.keys((this.metadata as any).tiles ?? {});
+  }
+
+  async loadTile(tileId: string): Promise<ArrayBuffer> {
+    const url = `${this.baseUrl}/tiles/${tileId}.bin`;
 
     const buffer = await firstValueFrom(
-      this.http.get(
-        `${this.BASE}/tile/${id}`,
-        { responseType: 'arraybuffer' as const }
-      )
+      this.http.get(url, { responseType: 'arraybuffer' })
     );
 
-    const data = new Float32Array(buffer);
-    const count = data.length / 6;
-
-    const positions = new Float32Array(count * 3);
-    const colors = new Float32Array(count * 3);
-
-    let p = 0;
-    let c = 0;
-
-    for (let i = 0; i < data.length; i += 6) {
-      positions[p++] = data[i];
-      positions[p++] = data[i+1];
-      positions[p++] = data[i+2];
-
-      colors[c++] = data[i+3] / 65535;
-      colors[c++] = data[i+4] / 65535;
-      colors[c++] = data[i+5] / 65535;
-    }
-
-    return {
-      id,
-      positions,
-      colors
-    };
+    return buffer;
   }
 }

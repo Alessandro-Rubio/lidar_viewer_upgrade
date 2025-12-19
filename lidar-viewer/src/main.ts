@@ -1,5 +1,9 @@
 import { bootstrapApplication } from '@angular/platform-browser';
-import { AppComponent } from './app/app';
+import { provideHttpClient } from '@angular/common/http';
+import { PointCloudViewer } from './app/components/point-cloud-viewer/point-cloud-viewer';
 
-bootstrapApplication(AppComponent)
-  .catch(err => console.error(err));
+bootstrapApplication(PointCloudViewer, {
+  providers: [
+    provideHttpClient()
+  ]
+}).catch(err => console.error(err));
